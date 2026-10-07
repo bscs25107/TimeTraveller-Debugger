@@ -429,3 +429,9 @@ FodyWeavers.xsd
 
 build/
 *.tdbg
+
+out/
+.vs/
+build/
+resolve.bin
+*.tdbg

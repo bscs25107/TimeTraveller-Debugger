@@ -4,9 +4,9 @@ project(ttdb CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(ttdb
-    src/main.cpp
-)
+file(GLOB SOURCES CONFIGURE_DEPENDS src/*.cpp)
+add_executable(ttdb ${SOURCES})
+target_include_directories(ttdb PRIVATE src)
 
 if(MSVC)
     target_compile_options(ttdb PRIVATE /W4)

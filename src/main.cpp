@@ -160,6 +160,18 @@ bool readSourceLine(ifstream& in, string& out)
 string firstWord(const string& line)
 {
     // returns first word from the input string
+    string f_word;
+    for (size_t i = 0;i < line.length();i++)
+    {
+        if(line[i]!=' '&& line[i] != '\t')
+        {
+            f_word += line[i];
+        }
+        if (f_word.length() != 0 && line[i] == ' ') { return f_word; }
+        if (f_word.length() != 0 && line[i] == '\t') { return f_word; }
+
+    }
+    return f_word;
 }
 string secondWord(const string& line)
 {

@@ -169,7 +169,6 @@ string firstWord(const string& line)
         }
         if (f_word.length() != 0 && line[i] == ' ') { return f_word; }
         if (f_word.length() != 0 && line[i] == '\t') { return f_word; }
-
     }
     return f_word;
 }

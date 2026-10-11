@@ -1,0 +1,4 @@
+func foo n
+func fee n
+func_end
+func_end

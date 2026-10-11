@@ -1,0 +1,6 @@
+
+  func foo b
+   
+	set a 10
+
+func_end

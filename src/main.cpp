@@ -1,7 +1,7 @@
 // ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
 
 // Pipeline this file implements, top to bottom:
-//   0. Receive  -- stream the client's .trace bytes straight to source.bin on disk
+//   0. Receive    -- stream the client's .trace bytes straight to source.bin on disk                                              HOGYAAAAAAAAAAA!!!!!!!!!!!!!!
 //   1. Pass 0X0   -- validity check (FUNC/FUNC_END matching)
 //   2. Pass 0X1   -- resolve(): copy EVERY source line into resolve.bin as [offset][size][string], then patch CALL targets.
 //   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
@@ -156,7 +156,18 @@ struct PendingPatch
 bool readSourceLine(ifstream& in, string& out)
 {
     // reads the next nonblank line
-
+    string line;
+    while (getline(in, line))
+    {
+        if (!line.empty()&&line.back() == '\r') { line.pop_back(); }
+        if (line.find_first_not_of(" \t")==string::npos) { continue; }
+        else
+        {
+            out = line;
+            return true;
+        }
+    }
+    return false;
 }
 string firstWord(const string& line)
 {
@@ -197,6 +208,7 @@ string secondWord(const string& line)
 bool validateProgram(const char* sourcePath)
 {
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
+
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
@@ -270,6 +282,7 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 // main section
 int32_t main()
 {
+
 
     if (!validateProgram("source.bin"))
     {

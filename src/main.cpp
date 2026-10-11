@@ -208,7 +208,29 @@ string secondWord(const string& line)
 bool validateProgram(const char* sourcePath)
 {
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 
-
+    ifstream f(sourcePath, ios::binary);
+    if (!f) { cout << "ERROR:( file not found\n"; return false; }
+    
+    bool open = false;
+    int line_no=0;
+    int firstline = 0;
+    string line;
+    while (readSourceLine(f, line))
+    {
+        line_no++; 
+        if ("func" == firstWord(line)) 
+        {
+            if (!open) { open = true; firstline = line_no;; }
+            else { cout << "'-' Nested Functions '-'\n";return false; }
+        }
+        if ("func_end" == firstWord(line))
+        {
+            if (open) { open = false;  }
+            else { cout << "'-' Missing func at line "<<line_no<<" '-'\n"; return false; }
+        }
+    }
+    if (open) { cout << "'-' Missing Func_end " << firstline << " '-'\n"; return false; }
+    else { return true; }
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
@@ -286,9 +308,10 @@ int32_t main()
 
     if (!validateProgram("source.bin"))
     {
-        // send an error response instead of a .tdbg file
         return 1;
     }
+    cout << "OK" << endl;
+    return 0;
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
 

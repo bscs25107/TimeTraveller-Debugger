@@ -1,8 +1,9 @@
-func foo b
-set a 10
-add b a
-func_end
-func main
-set k 10
-call foo k
-func_end
+main at 81
+0 [func foo b]
+22 [set a 10]
+42 [add b a]
+61 [func_end]
+81 [func main]
+102 [set k 10]
+0 [call foo k]
+144 [func_end]

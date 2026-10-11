@@ -430,7 +430,14 @@ int32_t main()
     }
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-
+    cout << "main at " << mainOffset << endl;
+    FILE* f = fopen("resolve.bin", "rb");
+    string t;
+    int64_t off;
+    while ((off = readResolveRecord(f, t)) != -1)
+        cout << off << " [" << t << "]" << endl;
+    fclose(f);
+    return 0;
     Timeline timeline;
     executeProgram("resolve.bin", mainOffset, timeline);
 

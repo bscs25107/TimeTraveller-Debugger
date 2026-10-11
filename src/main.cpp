@@ -229,7 +229,7 @@ bool validateProgram(const char* sourcePath)
             else { cout << "'-' Missing func at line "<<line_no<<" '-'\n"; return false; }
         }
     }
-    if (open) { cout << "'-' Missing Func_end " << firstline << " '-'\n"; return false; }
+    if (open) { cout << "'-' Missing Func_end at line" << firstline << " '-'\n"; return false; }
     else { return true; }
 }
 

@@ -156,6 +156,7 @@ struct PendingPatch
 bool readSourceLine(ifstream& in, string& out)
 {
     // reads the next nonblank line
+
 }
 string firstWord(const string& line)
 {
@@ -163,7 +164,7 @@ string firstWord(const string& line)
     string f_word;
     for (size_t i = 0;i < line.length();i++)
     {
-        if(line[i]!=' '&& line[i] != '\t')
+        if (line[i] != ' ' && line[i] != '\t')
         {
             f_word += line[i];
         }
@@ -174,8 +175,25 @@ string firstWord(const string& line)
 }
 string secondWord(const string& line)
 {
-    // returns the second word
+    // returns second word from the input string
+    size_t i = 0;
+    size_t len = line.length();
+
+    while (i < len && isspace((line[i]))) { i++; }
+    while (i < len && !isspace((line[i]))) { i++; }
+    while (i < len && isspace((line[i]))) { i++; }
+
+    string sword;
+    while (i < len && !isspace((line[i]))) 
+    {
+        sword += line[i];
+        i++;
+    }
+
+    return sword;
 }
+
+
 bool validateProgram(const char* sourcePath)
 {
     // for each func defined there should be exactly one func_end and no nested funcs allowed - 

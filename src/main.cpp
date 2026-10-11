@@ -238,7 +238,17 @@ int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
     // writes one [offset(8B)][size(4B)][string] record at the current file position
     // returns this record's own starting byte position
+    int64_t start = ftell(f);
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    int32_t text_length = static_cast<int32_t>(text.length());
+    fwrite(&text_length, sizeof(int32_t), 1, f);
+    if (!text.empty())
+    {
+        fwrite(text.data(), sizeof(char), text.size(), f);
+    }
+    return start;
 }
+
 int64_t readResolveRecord(FILE* f, string& outText)
 {
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
@@ -308,10 +318,8 @@ int32_t main()
 
     if (!validateProgram("source.bin"))
     {
-        return 1;
+       
     }
-    cout << "OK" << endl;
-    return 0;
 
     int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
 

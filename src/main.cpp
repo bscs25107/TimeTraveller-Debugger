@@ -11,9 +11,9 @@
 #include <iostream>
 #include <string>
 #include <cstdint>
-#include <fstream>
-//#include <unistd.h>
-//#include <sys/socket.h>
+#include <fstream>/*
+#include <unistd.h>
+#include <sys/socket.h>*/
 #include <cstdio>
 using namespace std;
 
@@ -38,22 +38,30 @@ class Stack
         T data;
         Node* next;
     };
+
     Node* top;
     int32_t count;
 
 public:
     // Implement these functions:
-    Stack()
-    { // initialize the stack
+    Stack():count(0)
+    { 
+        top = nullptr;
     }
     void push(const T& val)
     {
-
-        // pushes the value on the stack if max limit is not reached yet.
+        if (count < MAX_STACK_DEPTH)
+        {
+            top[count] = val;
+            count++;
+        }
+        else { cout << "'-' Stack Limit Reached '-'\n"; }
     }
     T pop()
     {
-        // pop the top value on the stack
+        if (!isEmpty())
+        {
+        }
     }
     T& peek()
     {
@@ -251,15 +259,28 @@ int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 
 int64_t readResolveRecord(FILE* f, string& outText)
 {
-    // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+    // reads one record at the current position and advances past it, 
+    // returns the offset field - the raw line text comes back untouched in outText.
+    // returns this record's own starting byte position
+    int64_t offsetField;
+    if (fread(&offsetField, sizeof(int64_t), 1, f) != 1)
+    {
+        return -1;
+    }
+    int32_t text_length = static_cast<int32_t>(outText.length());
+    if (fread(&text_length, sizeof(int32_t), 1, f) != 1)
+    {
+        return -1;
+    }
+    outText.resize(text_length);
+    if (text_length>0)
+    {
+        fread(&outText[0], sizeof(char), outText.size(), f);
+    }
+    return offsetField;
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
-{
-    FuncEntry funcArray[MAX_FUNCS];
-    int32_t funcCount = 0;
-    PendingPatch patches[MAX_PATCHES];
-    int32_t patchCount = 0;
-    // Every source line becomes one record holding the raw line, as-is.
+{ // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
     // and where its offset field sits).
@@ -267,6 +288,90 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     // with its target's position. Patching happens after the full write
     // Returns the byte offset of main's FUNC header record.
     // if there is no main return the error 
+    FuncEntry funcArray[MAX_FUNCS];
+    int32_t funcCount = 0;
+    PendingPatch patches[MAX_PATCHES];
+    int32_t patchCount = 0;
+
+    ifstream in(sourcePath, ios::binary);
+    if (!in) { cout << "ERROR: source file not found\n"; return -1; }
+
+    FILE* file = fopen(resolveBinPath, "w+b");
+    if (!file) { cout << "ERROR: cannot create resolve.bin\n"; return -1; }
+
+    string line;
+    while (readSourceLine(in, line))
+    {
+        string kw = firstWord(line);
+        int64_t start = ftell(file);
+        writeResolveRecord(file, start, line);
+
+        if (kw == "func")
+        {
+            if (funcCount >= MAX_FUNCS)
+            {
+                cout << "ERROR: too many functions\n";
+                fclose(file);
+                return -1;
+            }
+            funcArray[funcCount].funcName = secondWord(line);
+            funcArray[funcCount].byteOffsetInResolveBin = start;
+            funcCount++;
+        }
+        else if (kw == "call")
+        {
+            if (patchCount >= MAX_PATCHES)
+            {
+                cout << "ERROR: too many calls\n";
+                fclose(file);
+                return -1;
+            }
+            patches[patchCount].byteOffsetOfOffsetField = start;
+            patches[patchCount].targetFuncName = secondWord(line);
+            patchCount++;
+        }
+    }
+
+    for (int32_t j = 0; j < patchCount; j++)
+    {
+        int64_t target = -1;
+        for (int32_t i = 0; i < funcCount; i++)
+        {
+            if (funcArray[i].funcName == patches[j].targetFuncName)
+            {
+                target = funcArray[i].byteOffsetInResolveBin;
+                break;
+            }
+        }
+        if (target < 0)
+        {
+            cout << "ERROR: call to undefined function '"
+                << patches[j].targetFuncName << "'\n";
+            fclose(file);
+            return -1;
+        }
+        fseek(file, static_cast<long>(patches[j].byteOffsetOfOffsetField), SEEK_SET);
+        fwrite(&target, sizeof(int64_t), 1, file);
+    }
+
+    int64_t mainOffset = -1;
+    for (int32_t i = 0; i < funcCount; i++)
+    {
+        if (funcArray[i].funcName == "main")
+        {
+            mainOffset = funcArray[i].byteOffsetInResolveBin;
+            break;
+        }
+    }
+    if (mainOffset < 0)
+    {
+        cout << "ERROR: no main function\n";
+        fclose(file);
+        return -1;
+    }
+
+    fclose(file);
+    return mainOffset;
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
@@ -311,6 +416,9 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     // after timeline add the index array i the file
     // update the header
 }
+
+
+
 // main section
 int32_t main()
 {

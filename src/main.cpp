@@ -52,7 +52,10 @@ public:
     {
         if (count < MAX_STACK_DEPTH)
         {
-            top[count] = val;
+            Node* n = new Node();
+            n->data = val;
+            n->next = top;
+            top = n;
             count++;
         }
         else { cout << "'-' Stack Limit Reached '-'\n"; }
@@ -61,22 +64,50 @@ public:
     {
         if (!isEmpty())
         {
+            Node* old = top;
+            T val = old->data;
+            top = top->next;
+            delete old;
+            count--;
+            return val;
         }
+        cout << "'-' Stack At 0 '-'\n";
+        return T();
     }
     T& peek()
     {
         // returns the top value on the stack
+        if (!isEmpty())
+        {
+            return top->data;
+        }
+        else { return T(); }
     }
     bool isEmpty()
     {
+        if (count <= 0)
+        {
+            return true;
+        }
+        return false;
     }
     int32_t depth()
     {
+        return count;
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
         // copies every frame, top to bottom in the array given as a parameter
         // this is what buildSnapshot() call, returns count written
+        Node* current = top;
+        int32_t i = 0;
+
+        while (current != nullptr && i < maxLen)
+        {
+            out[i++] = current->data;
+            current = current->next;
+        }
+        retuen i;
     }
 };
 
@@ -96,18 +127,38 @@ class Timeline
 
 public:
     // Implement these functions
-    Timeline()
+    Timeline():stepCount(0)
     {
+        head = tail = nullptr;
     }
     void record(Snapshot* s)
     {
         // add record in the timeline
+        if (head == nullptr)
+        {
+            tail->data=head->data = s;
+            stepCount++;
+        }
+        if (head->next == nullptr)
+        {
+            tail->data = s;
+            head->next= tail;
+            tail->prev = head;
+            stepCount++;
+        }
+        TimelineNode* temp = head;
+        while (temp != nullptr || temp->next != nullptr)
+        {
+
+        }
     }
     TimelineNode* begin()
     {
+        return head;
     }
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
@@ -367,7 +418,7 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     {
         cout << "ERROR: no main function\n";
         fclose(file);
-        return -1;
+        return 1;
     }
 
     fclose(file);

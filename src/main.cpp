@@ -6,6 +6,7 @@
 //   2. Pass 0X1   -- resolve(): copy EVERY source line into resolve.bin as [offset][size][string], then patch CALL targets.
 //   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
 //   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
+#define _CRT_SECURE_NO_WARNINGS
 
 #include <iostream>
 #include <string>
@@ -15,7 +16,6 @@
 #include <sys/socket.h>*/
 #include <cstdio>
 using namespace std;
-
 // ---- Constants ----
 const int32_t MAX_VARS_PER_FRAME = 16;
 const int32_t MAX_STACK_DEPTH = 64;
@@ -47,6 +47,16 @@ public:
     { 
         top = nullptr;
     }
+    ~Stack()
+    {
+        while (top != nullptr)
+        {
+            Node* n = top;
+            top = top->next;
+            delete n;
+        }
+    }
+
     void push(const T& val)
     {
         if (count < MAX_STACK_DEPTH)
@@ -75,9 +85,12 @@ public:
     }
     T& peek()
     {
-            return empty;
-
+        if (!isEmpty()) return top->data;
+        static T emptyValue = T();
+        emptyValue = T();
+        return emptyValue;
     }
+
     bool isEmpty()
     {
         if (count <= 0)
@@ -126,7 +139,7 @@ public:
     {
         head = tail = nullptr;
     }
-
+    ~Timeline();
     void record(Snapshot* s)
     {
         // add record in the timeline
@@ -173,7 +186,21 @@ struct Snapshot
 {
     Frame callStack[MAX_STACK_DEPTH];
     int32_t stackDepth;
+
 };
+
+Timeline::~Timeline()
+{
+    TimelineNode* cur = head;
+    while (cur != nullptr)
+    {
+        TimelineNode* nx = cur->next;
+        delete cur->data;
+        delete cur;
+        cur = nx;
+    }
+}
+
 struct TTDBHeader
 {
     char magic[4]; // "TTDB"
@@ -323,7 +350,13 @@ int64_t readResolveRecord(FILE* f, string& outText)
     return offsetField;
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
-{ // Every source line becomes one record holding the raw line, as-is.
+{ 
+    FuncEntry funcArray[MAX_FUNCS];
+    int32_t funcCount = 0;
+    PendingPatch patches[MAX_PATCHES];
+    int32_t patchCount = 0;
+
+    // Every source line becomes one record holding the raw line, as-is.
     // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
     // (remember its position) and CALL (remember which function it needs
     // and where its offset field sits).
@@ -331,37 +364,44 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     // with its target's position. Patching happens after the full write
     // Returns the byte offset of main's FUNC header record.
     // if there is no main return the error 
-    FuncEntry funcArray[MAX_FUNCS];
-    int32_t funcCount = 0;
-    PendingPatch patches[MAX_PATCHES];
-    int32_t patchCount = 0;
+ 
 
     ifstream in(sourcePath, ios::binary);
-    if (!in) { cout << "ERROR: source file not found\n"; return -1; }
+    if (!in) { cout << "ERROR:( source file not found\n"; return -1; }
 
     FILE* file = fopen(resolveBinPath, "w+b");
-    if (!file) { cout << "ERROR: cannot create resolve.bin\n"; return -1; }
+    if (!file) { cout << "ERROR:( cannot create resolve.bin\n"; return -1; }
 
     string line;
     while (readSourceLine(in, line))
     {
-        string kw = firstWord(line);
+        string key = firstWord(line);
         int64_t start = ftell(file);
         writeResolveRecord(file, start, line);
-
-        if (kw == "func")
+        if (key == "func")
         {
+            string f_name = secondWord(line);
+
             if (funcCount >= MAX_FUNCS)
             {
                 cout << "ERROR: too many functions\n";
                 fclose(file);
                 return -1;
             }
-            funcArray[funcCount].funcName = secondWord(line);
+            for (int32_t i = 0; i < funcCount; i++)
+            {
+                if (funcArray[i].funcName == f_name)
+                {
+                    cout << "Error:( Two functions of the same name [ " << f_name << " ]\n";
+                    fclose(file);
+                    return -1;
+                }
+            }
+            funcArray[funcCount].funcName = f_name;
             funcArray[funcCount].byteOffsetInResolveBin = start;
             funcCount++;
         }
-        else if (kw == "call")
+        else if (key == "call")
         {
             if (patchCount >= MAX_PATCHES)
             {
@@ -377,48 +417,49 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 
     for (int32_t j = 0; j < patchCount; j++)
     {
-        int64_t target = -1;
+        int64_t trgt = -1;
+
         for (int32_t i = 0; i < funcCount; i++)
         {
             if (funcArray[i].funcName == patches[j].targetFuncName)
             {
-                target = funcArray[i].byteOffsetInResolveBin;
+                trgt = funcArray[i].byteOffsetInResolveBin;
                 break;
             }
         }
-        if (target < 0)
+        if (trgt < 0)
         {
-            cout << "ERROR: call to undefined function '"
-                << patches[j].targetFuncName << "'\n";
+            cout << "ERROR: call to undefined function '" << patches[j].targetFuncName << "'\n";
             fclose(file);
             return -1;
         }
+
         fseek(file, static_cast<long>(patches[j].byteOffsetOfOffsetField), SEEK_SET);
-        fwrite(&target, sizeof(int64_t), 1, file);
+        fwrite(&trgt, sizeof(int64_t), 1, file);
     }
 
-    int64_t mainOffset = -1;
+    int64_t main_offset = -1;
     for (int32_t i = 0; i < funcCount; i++)
     {
         if (funcArray[i].funcName == "main")
         {
-            mainOffset = funcArray[i].byteOffsetInResolveBin;
+            main_offset = funcArray[i].byteOffsetInResolveBin;
             break;
         }
     }
-    if (mainOffset < 0)
+    if (main_offset < 0)
     {
-        cout << "ERROR: no main function\n";
+        cout << "ERROR:( no main function\n";
         fclose(file);
-        return 1;
+        return -1;
     }
 
     fclose(file);
-    return mainOffset;
+    return main_offset;
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
-Variable* get_variable(const std::string& name);
+Variable* get_variable(Frame& f, const string& name);
 Variable* find_variable(Frame& f, const string& name)
 {
     for (int32_t i = 0; i < f.argc; i++)
@@ -438,17 +479,43 @@ Variable* find_variable(Frame& f, const string& name)
     return nullptr;
 }
 
+static bool number_check (const string& s)
+{
+    if (s.empty()) 
+    {
+        return false;
+    }
+
+   
+
+    if (s[0]=='-'||s[0]=='+')
+    {
+        return false;
+    }
+
+    for (auto i=0 ; i < s.size(); i++)
+    {
+        if (!isdigit(s[i]))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
 int32_t return_value(Frame& f, const string& text)
 {
     if (text.empty())
     {
         return 0;
     }
-    if (isdigit(text[0])||(text[0]=='-'&&text.size()>1))
+    if (number_check(text))
     {
-          return stoi(text);
+        return stoi(text);
     }
+
     Variable* value1 = get_variable(f, text);
+
     if (value1 == nullptr)
     {
         return 0;
@@ -484,54 +551,48 @@ struct Token
     TokenType type;
     string text;
 };
+
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
+
     // first word is always a instruction keyword
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
     // after identifier all are the params/arg, space separated
-
-    size_t  idx = 0;
+    size_t idx = 0;
     size_t length = line.length();
     int32_t count = 0;
-    string words;
     while (idx < length)
     {
-        while (idx < length && isspace(line[idx]))
+        while (idx < length && isspace((unsigned char)line[idx])) idx++;
+        if (idx >= length) break;
+        if (count >= maxTokens)
         {
-            idx++;
-        }
-        if (idx >= length)
-        {
-            break;
-        }
-        if (count > maxTokens) 
-        { 
             cout << "'-' Token Capacity Reached '-'\n";
             break;
         }
 
-        while (idx < length && !isspace(line[idx]))
+        string word;
+        while (idx < length && !isspace((unsigned char)line[idx]))
         {
-            words += line[idx];
+            word += line[idx];
             idx++;
         }
-        if (count == 0) { tokens[count].type = KEYWORD; }
-        else if (count == 1) { tokens[count].type = IDENTIFIER; }
-        else{ tokens[count].type = PARAM; }
-        tokens[count].text = words;
+        if (count == 0)      tokens[count].type = KEYWORD;
+        else if (count == 1) tokens[count].type = IDENTIFIER;
+        else                 tokens[count].type = PARAM;
+        tokens[count].text = word;
         count++;
     }
     return count;
 }
-
-Snapshot* buildSnapshot(Stack<Frame>& callStack)
+static Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
     Snapshot* s = new Snapshot();
     s->stackDepth = callStack.snapshot_into(s->callStack, MAX_STACK_DEPTH);
     return s;
 }
-void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
+bool executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
     // initialize the call stack
     // make the main frame
@@ -541,120 +602,208 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     // execute line by line, and according to the keyword perform action
 
     FILE* f = fopen(resolveBinPath, "rb");
-    if (!f) { cout << "ERROR: cannot open resolve.bin\n"; return; }
-
+    if (!f) { cout << "ERROR: cannot open resolve.bin\n"; return false; }
+    bool found = true;
     string line;
     fseek(f, static_cast<long>(mainOffset), SEEK_SET);
-    if (readResolveRecord(f, line) == -1) { fclose(f); return; }
+    if (readResolveRecord(f, line) == -1)
+    { 
+        fclose(f);
+        return false;
+    }
 
-    Stack<Frame> callStack;
-    Frame mainFrame;
-    mainFrame.func_name = "main";
-    mainFrame.argc = 0;
-    mainFrame.localCount = 0;
-    mainFrame.returnLine = -1;
-    callStack.push(mainFrame);
+    Stack<Frame> c_stack;
+    Frame f_main;
+    f_main.func_name = "main";
+    f_main.argc = 0;
+    f_main.localCount = 0;
+    f_main.returnLine = -1;
+    c_stack.push(f_main);
 
-    while (!callStack.isEmpty())
+    while (!c_stack.isEmpty())
     {
         int64_t recStart = ftell(f);                  
         int64_t off = readResolveRecord(f, line);     
-        if (off == -1) break;
+        if (off == -1) 
+        {
+            found = false;
+
+            break;
+        }
 
         Token tokens[MAX_TOKENS];
         int32_t n = tokenizeLine(line, tokens, MAX_TOKENS);
-        if (n == 0) continue;
-
-        Frame& cur = callStack.peek();
-        const string kw = tokens[0].text;
-
-        if (kw == "set")
+        if (n == 0)
         {
-            if (n < 3) { cout << "ERROR: 'set' needs a name and a value\n"; break; }
-            Variable* v = get_variable(cur, tokens[1].text);
-            if (!v) { cout << "ERROR: too many variables in " << cur.func_name << "\n"; break; }
-            v->value = return_value(cur, tokens[2].text);
+            continue;
         }
-        else if (kw == "add" || kw == "sub" || kw == "mul" || kw == "div")
-        {
-            if (n < 3) { cout << "ERROR: '" << kw << "' needs two operands\n"; break; }
-            Variable* v = get_variable(cur, tokens[1].text);
-            if (!v) { cout << "ERROR: too many variables in " << cur.func_name << "\n"; break; }
-            int32_t rhs = return_value(cur, tokens[2].text);
 
-            if (kw == "add")      v->value += rhs;
-            else if (kw == "sub") v->value -= rhs;
-            else if (kw == "mul") v->value *= rhs;
+        Frame& current = c_stack.peek();
+        const string key = tokens[0].text;
+
+        if (key == "set")
+        {
+            if (n < 3) 
+            { 
+                cout << "ERROR: 'set' needs a name and a value\n";
+                found = false;
+                break;
+            }
+
+            Variable* v = get_variable(current, tokens[1].text);
+            if (!v) 
+            { 
+
+                cout << "ERROR: too many variables in " << current.func_name << "\n";          
+                found = false;
+
+                break;
+            }
+
+            v->value = return_value(current, tokens[2].text);
+        }
+        else if (key == "add" || key == "sub" || key == "mul" || key == "div")
+        {
+            if (n < 3) 
+            { 
+                cout << "ERROR: '" << key << "' needs two operands\n";
+                found = false;
+                break; 
+            }
+            Variable* v = get_variable(current, tokens[1].text);
+            if (!v) 
+            { 
+                cout << "ERROR: too many variables in " << current.func_name << "\n"; 
+                found = false;
+                break;
+            }
+            int32_t rhs = return_value(current, tokens[2].text);
+
+            if (key == "add")    
+            {
+                v->value += rhs;
+            }
+            else if (key == "sub")
+            {
+                v->value -= rhs;
+            }
+            else if (key == "mul") 
+            {
+                v->value *= rhs;
+            }
             else
             {
-                if (rhs == 0) { cout << "ERROR: division by zero in " << cur.func_name << "\n"; break; }
+                if (rhs == 0) 
+                { 
+                    cout << "ERROR: division by zero in " << current.func_name << "\n";
+                    found = false;
+                    break;
+                }
+
                 v->value /= rhs;
             }
         }
-        else if (kw == "call")
+        else if (key == "call")
         {
-            if (n < 2) { cout << "ERROR: 'call' needs a function name\n"; break; }
-            if (callStack.depth() >= MAX_STACK_DEPTH)
+            if (n < 2) 
+            { 
+                cout << "ERROR: 'call' needs a function name\n";
+                found = false;
+                break;
+            }
+            if (c_stack.depth() >= MAX_STACK_DEPTH)
             {
                 cout << "ERROR: stack overflow while calling " << tokens[1].text << "\n";
+                found = false;
                 break;
             }
 
             fseek(f, static_cast<long>(off), SEEK_SET);
-            string hdrLine;
-            if (readResolveRecord(f, hdrLine) == -1) { cout << "ERROR: bad call target\n"; break; }
-            Token hdr[MAX_TOKENS];
-            int32_t nHdr = tokenizeLine(hdrLine, hdr, MAX_TOKENS);
-
-            int32_t nParams = nHdr - 2; if (nParams < 0) nParams = 0;
-            int32_t nArgs = n - 2;    if (nArgs < 0)   nArgs = 0;
-            if (nParams != nArgs || nParams > MAX_VARS_PER_FRAME)
-            {
-                cout << "ERROR: wrong number of arguments in call to " << tokens[1].text << "\n";
+            string hdr_line;
+            if (readResolveRecord(f, hdr_line) == -1) 
+            { 
+                cout << "ERROR: bad call target\n";
+                found = false;
                 break;
             }
 
-            Frame callee;
-            callee.func_name = tokens[1].text;
-            callee.argc = nParams;
-            callee.localCount = 0;
-            callee.returnLine = static_cast<int32_t>(recStart);  
-            for (int32_t i = 0; i < nParams; i++)
+            Token hdr[MAX_TOKENS];
+            int32_t n_hdr = tokenizeLine(hdr_line, hdr, MAX_TOKENS);
+
+            int32_t n_param = n_hdr - 2; 
+            if (n_param < 0) 
             {
-                callee.argv[i].name = hdr[2 + i].text;                        
-                callee.argv[i].value = return_value(cur, tokens[2 + i].text);  
+                n_param = 0;
             }
-            callStack.push(callee);     
+
+            int32_t n_arg = n - 2;   
+            if (n_arg < 0) 
+            {
+                n_arg = 0;
+            }
+            if (n_param != n_arg || n_param > MAX_VARS_PER_FRAME)
+            {
+                cout << "ERROR: wrong number of arguments in call to " << tokens[1].text << "\n";
+                found = false;
+                break;
+            }
+
+            Frame calling;
+            calling.func_name = tokens[1].text;
+            calling.argc = n_param;
+            calling.localCount = 0;
+            calling.returnLine = static_cast<int32_t>(recStart);
+
+            for (int32_t i = 0; i < n_param; i++)
+            {
+                calling.argv[i].name = hdr[2 + i].text;
+                calling.argv[i].value = return_value(current, tokens[2 + i].text);
+            }
+
+            c_stack.push(calling);
         }
-        else if (kw == "func_end")
+        else if (key == "func_end")
         {
-            Frame done = callStack.pop();   
-            if (!callStack.isEmpty())
+            Frame done = c_stack.pop();   
+            if (!c_stack.isEmpty())
             {
                 fseek(f, static_cast<long>(done.returnLine), SEEK_SET);
+
                 string callLine;
-                if (readResolveRecord(f, callLine) == -1) { cout << "ERROR: bad return address\n"; break; }
+                if (readResolveRecord(f, callLine) == -1)
+                { 
+                    cout << "ERROR: bad return address\n";
+                    found = false;
+                    break;
+                }
+
                 Token ct[MAX_TOKENS];
                 int32_t nct = tokenizeLine(callLine, ct, MAX_TOKENS);
 
-                Frame& caller = callStack.peek();
+                Frame& caller = c_stack.peek();
                 for (int32_t i = 0; i < done.argc && 2 + i < nct; i++)
                 {
                     Variable* v = find_variable(caller, ct[2 + i].text);
-                    if (v) v->value = done.argv[i].value;   
+                    if (v)
+                    {
+                        v->value = done.argv[i].value;
+                    }
                 }
             }
         }
         else
         {
-            cout << "ERROR: unknown instruction '" << kw << "'\n";
+            cout << "ERROR: unknown instruction '" << key << "'\n";
+            found = false;
             break;
         }
 
-        timeline.record(buildSnapshot(callStack));  
-    }
-
+        timeline.record(buildSnapshot(c_stack));  
+        
+}
+    
     fclose(f);
+    return found;
 }
 
 void write_header(FILE* f, const TTDBHeader& h)
@@ -669,6 +818,7 @@ static void write_string(FILE* f, const string& s)
 {
     int32_t length = static_cast<int32_t>(s.length());
     fwrite(&length, sizeof(int32_t), 1, f);
+
     if (length > 0)
     {
         fwrite(s.data(), 1, s.length(), f);
@@ -681,7 +831,7 @@ static void write_variable(FILE* f, const Variable& v)
     fwrite(&v.value, sizeof(int32_t), 1, f);
 }
 
-static int32_t clamp_ct(int32_t c)
+static int32_t check_ct(int32_t c)
 {
     if (c < 0) 
     {
@@ -698,7 +848,7 @@ static void write_frame(FILE* f, const Frame& fr)
 {
     write_string(f, fr.func_name);
 
-    int32_t arg_c = clamp_ct(fr.argc);
+    int32_t arg_c = check_ct(fr.argc);
     fwrite(&arg_c, sizeof(int32_t), 1, f);
     for (int32_t i = 0; i < arg_c; i++) 
     {
@@ -707,7 +857,7 @@ static void write_frame(FILE* f, const Frame& fr)
 
     fwrite(&fr.returnLine, sizeof(int32_t), 1, f);
 
-    int32_t l = clamp_ct(fr.localCount);
+    int32_t l = check_ct(fr.localCount);
     fwrite(&l, sizeof(int32_t), 1, f);
     for (int32_t i = 0; i < l; i++) 
     {
@@ -746,15 +896,16 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 
         int32_t steps = timeline.getStepCount();
 
-        // 1. placeholder header
         TTDBHeader h;
-        h.magic[0] = 'T'; h.magic[1] = 'T'; h.magic[2] = 'D'; h.magic[3] = 'B';
+        h.magic[0] = 'T';
+        h.magic[1] = 'T';
+        h.magic[2] = 'D';
+        h.magic[3] = 'B';
         h.version = 1;
         h.stepCount = steps;
         h.indexOffset = 0;
         write_header(f, h);
 
-        // 2. snapshots, remembering where each one starts
         int64_t* index = new int64_t[steps > 0 ? steps : 1];
         int32_t written = 0;
         for (TimelineNode* n = timeline.begin(); n != nullptr && written < steps; n = n->next)
@@ -763,12 +914,13 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
             write_snapshot(f, *n->data);
         }
 
-        // 3. index array goes right after the last snapshot
         h.indexOffset = ftell(f);
-        if (written > 0) fwrite(index, sizeof(int64_t), written, f);
+        if (written > 0) 
+        {
+            fwrite(index, sizeof(int64_t), written, f);
+        }
         delete[] index;
 
-        // 4. go back and fill in the real header
         h.stepCount = written;
         fseek(f, 0, SEEK_SET);
         write_header(f, h);
@@ -788,7 +940,10 @@ int32_t main()
     if (mainOffset < 0) return 1;
 
     Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
+    if (!executeProgram("resolve.bin", mainOffset, timeline)) 
+    {
+        return 1;
+    }
 
     writeTdbg(timeline, "session.tdbg");
     return 0;

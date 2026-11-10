@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <sstream>
+#include<vector>
 using namespace std;
 
 const int IO_BUFFER_SIZE = 64 * 1024;
@@ -125,4 +127,11 @@ public:
     }
 
     const char* trailer() const { return tail; }
+
+    struct TdbgReader
+    {
+        FILE* file;
+        TTDBHeader header;
+        vector<int64_t> index;
+    };
 };

@@ -9,21 +9,27 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <cstdint>
-#include <fstream>/*
-#include <unistd.h>
-#include <sys/socket.h>*/
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cctype>
+#include <cerrno>
+#include <fstream>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include "helper.h"
 using namespace std;
 // ---- Constants ----
-const int32_t MAX_VARS_PER_FRAME = 16;
-const int32_t MAX_STACK_DEPTH = 64;
 const int32_t MAX_FUNCS = 128;
 const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2; // kW + func_name + upto 16 params/args
 const int32_t MAX_PATCHES = MAX_FUNCS * 4;
-const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
-const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
+const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024;
 const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
 
 // ---- Custom data structures
@@ -168,26 +174,6 @@ public:
 };
 
 // Core structs
-struct Variable
-{
-    string name;
-    int32_t value;
-};
-struct Frame
-{
-    string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int32_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-};
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-
-};
 
 Timeline::~Timeline()
 {
@@ -201,13 +187,6 @@ Timeline::~Timeline()
     }
 }
 
-struct TTDBHeader
-{
-    char magic[4]; // "TTDB"
-    int32_t version;
-    int32_t stepCount;
-    int64_t indexOffset;
-};
 void writeHeader(FILE* f, const TTDBHeader& h)
 {
     fwrite(h.magic, 1, 4, f);
@@ -215,20 +194,6 @@ void writeHeader(FILE* f, const TTDBHeader& h)
 
     // placeholder for other two data members
 }
-
-// resolve.bin - bookkeeping
-struct FuncEntry
-{
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
-};
-struct PendingPatch
-{
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
-    string targetFuncName;
-};
-
-
 
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
@@ -847,40 +812,17 @@ static int32_t check_ct(int32_t c)
 static void write_frame(FILE* f, const Frame& fr)
 {
     write_string(f, fr.func_name);
-
-    int32_t arg_c = check_ct(fr.argc);
-    fwrite(&arg_c, sizeof(int32_t), 1, f);
-    for (int32_t i = 0; i < arg_c; i++) 
-    {
-        write_variable(f, fr.argv[i]);
-    }
-
+    fwrite(&fr.argc, sizeof(int32_t), 1, f);
+    for (int32_t i = 0; i < fr.argc; i++) write_variable(f, fr.argv[i]);
     fwrite(&fr.returnLine, sizeof(int32_t), 1, f);
-
-    int32_t l = check_ct(fr.localCount);
-    fwrite(&l, sizeof(int32_t), 1, f);
-    for (int32_t i = 0; i < l; i++) 
-    {
-        write_variable(f, fr.locals[i]);
-    }
+    fwrite(&fr.localCount, sizeof(int32_t), 1, f);
+    for (int32_t i = 0; i < fr.localCount; i++) write_variable(f, fr.locals[i]);
 }
 
 static void write_snapshot(FILE* f, const Snapshot& s)
 {
-    int32_t size = s.stackDepth;
-    if (size < 0)
-    {
-        size = 0;
-    }
-    if (size > MAX_STACK_DEPTH) 
-    {
-        size = MAX_STACK_DEPTH;
-    }
-    fwrite(&size, sizeof(int32_t), 1, f);
-    for (int32_t i = 0; i < size; i++) 
-    {
-        write_frame(f, s.callStack[i]);
-    }
+    fwrite(&s.stackDepth, sizeof(int32_t), 1, f);
+    for (int32_t i = 0; i < s.stackDepth; i++) write_frame(f, s.callStack[i]);
 }
 
 // PASS 0x3: SERIALIZE TIMELINE
@@ -891,60 +833,148 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
     // after timeline add the index array i the file
     // update the header
-        FILE* f = fopen(tdbgPath, "wb");
-        if (!f) { cout << "ERROR:( cannot create " << tdbgPath << "\n"; return; }
+    FILE* f = fopen(tdbgPath, "wb");
+    if (!f) return;
 
-        int32_t steps = timeline.getStepCount();
+    int32_t steps = timeline.getStepCount();
+    TTDBHeader h{ 'T','T','D','B', 1, steps, 0 };
 
-        TTDBHeader h;
-        h.magic[0] = 'T';
-        h.magic[1] = 'T';
-        h.magic[2] = 'D';
-        h.magic[3] = 'B';
-        h.version = 1;
-        h.stepCount = steps;
-        h.indexOffset = 0;
-        write_header(f, h);
+    fwrite(h.magic, 1, 4, f);
+    fwrite(&h.version, sizeof(int32_t), 1, f);
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 
-        int64_t* index = new int64_t[steps > 0 ? steps : 1];
-        int32_t written = 0;
-        for (TimelineNode* n = timeline.begin(); n != nullptr && written < steps; n = n->next)
-        {
-            index[written++] = ftell(f);
-            write_snapshot(f, *n->data);
-        }
+    vector<int64_t> index(steps);
+    int32_t written = 0;
+    for (TimelineNode* n = timeline.begin(); n != nullptr && written < steps; n = n->next)
+    {
+        index[written++] = ftell(f);
+        write_snapshot(f, *n->data);
+    }
 
-        h.indexOffset = ftell(f);
-        if (written > 0) 
-        {
-            fwrite(index, sizeof(int64_t), written, f);
-        }
-        delete[] index;
+    h.indexOffset = ftell(f);
+    fwrite(index.data(), sizeof(int64_t), written, f);
 
-        h.stepCount = written;
-        fseek(f, 0, SEEK_SET);
-        write_header(f, h);
+    fseek(f, 0, SEEK_SET);
+    fwrite(h.magic, 1, 4, f);
+    fwrite(&h.version, sizeof(int32_t), 1, f);
+    fwrite(&h.stepCount, sizeof(int32_t), 1, f);
+    fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 
-        fclose(f);
+    fclose(f);
     
 }
 
-
-
-// main section
-int32_t main()
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void serveClientSocket(int connSock)
 {
-    if (!validateProgram("source.bin")) return 1;
+    TrailerChecker checker;
+    char rawBuf[IO_BUFFER_SIZE];
+    char releaseBuf[IO_BUFFER_SIZE + 4];
 
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
-    if (mainOffset < 0) return 1;
+    FILE* src = fopen("server_source.bin", "wb");
+    ssize_t n;
+    char statusByte = 0;
+    bool first = true;
 
-    Timeline timeline;
-    if (!executeProgram("resolve.bin", mainOffset, timeline)) 
+    while ((n = recv(connSock, rawBuf, sizeof(rawBuf), 0)) > 0)
     {
-        return 1;
+        size_t rel = checker.feed(rawBuf, (size_t)n, releaseBuf);
+        if (rel > 0)
+        {
+            size_t startIdx = 0;
+            if (first)
+            {
+                statusByte = releaseBuf[0];
+                startIdx = 1;
+                first = false;
+            }
+            if (rel > startIdx) fwrite(releaseBuf + startIdx, 1, rel - startIdx, src);
+        }
+    }
+    if (src) fclose(src);
+
+    if (!checker.verify())
+    {
+        string err = "Upload checksum mismatch";
+        Crc32 crc;
+        char st = 1;
+        crc.update(&st, 1);
+        crc.update(err.data(), err.size());
+        char tr[4]; crcToBytes(crc.value(), tr);
+
+        sendAll(connSock, &st, 1);
+        sendAll(connSock, err.data(), err.size());
+        sendAll(connSock, tr, 4);
+        close(connSock);
+        return;
     }
 
-    writeTdbg(timeline, "session.tdbg");
+    string errMsg;
+    bool ok = validateProgram("server_source.bin", errMsg);
+    int64_t mainOff = -1;
+    if (ok) mainOff = resolveProgram("server_source.bin", "server_resolve.bin", errMsg);
+
+    Timeline timeline;
+    if (ok && mainOff >= 0) ok = executeProgram("server_resolve.bin", mainOff, timeline);
+    if (ok) writeTdbg(timeline, "server_session.tdbg");
+
+    Crc32 resCrc;
+    if (ok)
+    {
+        char st = 0;
+        resCrc.update(&st, 1);
+        sendAll(connSock, &st, 1);
+
+        FILE* tfile = fopen("server_session.tdbg", "rb");
+        while ((n = fread(rawBuf, 1, sizeof(rawBuf), tfile)) > 0)
+        {
+            resCrc.update(rawBuf, n);
+            sendAll(connSock, rawBuf, n);
+        }
+        fclose(tfile);
+    }
+    else
+    {
+        char st = 1;
+        resCrc.update(&st, 1);
+        resCrc.update(errMsg.data(), errMsg.size());
+
+        sendAll(connSock, &st, 1);
+        sendAll(connSock, errMsg.data(), errMsg.size());
+    }
+
+    char tr[4];
+    crcToBytes(resCrc.value(), tr);
+    sendAll(connSock, tr, 4);
+
+    close(connSock);
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// main section
+int main(int argc, char* argv[])
+{
+    int port = 5001;
+    if (argc >= 2) port = atoi(argv[1]);
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(s, (sockaddr*)&addr, sizeof(addr)) < 0) return 1;
+    if (listen(s, 1) < 0) return 1;
+
+    sockaddr_in cli{};
+    socklen_t clen = sizeof(cli);
+    int conn = accept(s, (sockaddr*)&cli, &clen);
+    if (conn >= 0) serveClientSocket(conn);
+
+    close(s);
     return 0;
 }

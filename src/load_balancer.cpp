@@ -80,7 +80,9 @@ public:
     {
         Node* n = new Node{ val, nullptr };
         if (rear == nullptr)
+        {
             front = rear = n;
+        }
         else
         {
             rear->next = n;
@@ -91,12 +93,19 @@ public:
     T dequeue()
     {
         if (front == nullptr)
+        {
             return T();
+        }
+
         Node* tmp = front;
         T val = tmp->data;
         front = front->next;
+
         if (front == nullptr)
+        {
             rear = nullptr;
+        }
+
         delete tmp;
         count--;
         return val;
@@ -131,11 +140,15 @@ bool sendAll(int sock, const char* buf, size_t n)
         if (r < 0)
         {
             if (errno == EINTR)
+            {
                 continue;
+            }
             return false;
         }
         if (r == 0)
+        {
             return false;
+        }
         sent += (size_t)r;
     }
     return true;
@@ -195,7 +208,9 @@ int connectToServer(const char* host, int port)
     // Return the socket, or -1 if the connection fails 
     int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (s < 0)
+    {
         return -1;
+    }
 
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -236,17 +251,23 @@ int connectToServerWithWakeup()
     // 4. Return the first working socket, or -1 if the server never came up.
     int s = connectToServer(serverHost.c_str(), serverPort);
     if (s >= 0)
+    {
         return s;
+    }
 
     if (!startServer(serverPort))
+    {
         return -1;
+    }
 
     for (int i = 0; i < STARTUP_MAX_ATTEMPTS; i++)
     {
         usleep(STARTUP_POLL_INTERVAL_MS * 1000);
         s = connectToServer(serverHost.c_str(), serverPort);
         if (s >= 0)
+        {
             return s;
+        }
     }
     return -1;
 }
@@ -277,18 +298,21 @@ void relayOneClient(ClientInfo& c)
     char buf[IO_BUFFER_SIZE];
     char out[IO_BUFFER_SIZE + 4];
 
-    // ---- Client -> server (verify the upload while forwarding) ----
     TrailerChecker upCheck;
     bool uploadFailed = false;
     while (true)
     {
         ssize_t n = recv(c.sock, buf, sizeof(buf), 0);
         if (n == 0)
+        {
             break;
+        }
         if (n < 0)
         {
             if (errno == EINTR)
+            {
                 continue;
+            }
             uploadFailed = true;
             break;
         }
@@ -303,7 +327,6 @@ void relayOneClient(ClientInfo& c)
 
     if (uploadFailed || !upCheck.verify())
     {
-        // Do not send the trailer: the server will reject the message by itself.
         shutdown(serverSock, SHUT_WR);
         close(serverSock);
         sendError(c.sock, "upload checksum mismatch");
@@ -315,20 +338,23 @@ void relayOneClient(ClientInfo& c)
         close(serverSock);
         return;
     }
-    shutdown(serverSock, SHUT_WR); // upload finished
+    shutdown(serverSock, SHUT_WR); 
 
-    // ---- Server -> client (verify the reply while forwarding) ----
     TrailerChecker downCheck;
     bool replyFailed = false;
     while (true)
     {
         ssize_t n = recv(serverSock, buf, sizeof(buf), 0);
         if (n == 0)
+        {
             break;
+        }
         if (n < 0)
         {
             if (errno == EINTR)
+            {
                 continue;
+            }
             replyFailed = true;
             break;
         }
@@ -340,9 +366,10 @@ void relayOneClient(ClientInfo& c)
         }
     }
 
-    // If the check fails, the trailer is not sent, so the client rejects the reply.
     if (!replyFailed && downCheck.verify())
+    {
         sendAll(c.sock, downCheck.trailer(), 4);
+    }
 
     close(serverSock);
 }
@@ -363,6 +390,41 @@ void acceptLoop(int listenSock)
     //   Otherwise enqueue the client socket.
     // Never wait for the server here, so new clients are always accepted quickly.
     // If accept() fails, print the error and keep going (do not end the thread).
+    while (flag)
+    {
+        sockaddr_in addr;
+        socklen_t len = sizeof(addr);
+        int cs = accept4(listenSock, (sockaddr*)&addr, &len, SOCK_CLOEXEC);
+        if (cs < 0)
+        {
+            if (!flag)
+                break;
+            perror("accept");
+            continue;
+        }
+
+        ClientInfo c;
+        c.sock = cs;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+        c.address = ip;
+        c.port = ntohs(addr.sin_port);
+        c.arrivedAt = time(nullptr);
+
+        bool full = false;
+        {
+            lock_guard<mutex> lock(queueMutex);
+            if (pendingClients.size() >= MAX_PENDING_CLIENTS)
+                full = true;
+            else
+                pendingClients.enqueue(c);
+        }
+        if (full)
+        {
+            sendError(cs, "server busy, try again later");
+            close(cs);
+        }
+    }
 }
 void dispatcherLoop()
 {
@@ -370,18 +432,62 @@ void dispatcherLoop()
     // Repeat:
     //   Lock queueMutex, take ONE client out of the queue if there is one, unlock.
     //   If we got a client: call relayOneClient(). The next client is taken out of the queue only after this one is finished.
+    while (flag)
+    {
+        ClientInfo c;
+        bool got = false;
+        {
+            lock_guard<mutex> lock(queueMutex);
+            if (!pendingClients.isEmpty())
+            {
+                c = pendingClients.dequeue();
+                got = true;
+            }
+        }
+        if (!got)
+        {
+            usleep(10 * 1000); 
+            continue;
+        }
+
+        if (time(nullptr) - c.arrivedAt > CLIENT_TIMEOUT_SEC)
+        {
+            close(c.sock); 
+            continue;
+        }
+
+        relayOneClient(c);
+        close(c.sock);
+    }
+
+    lock_guard<mutex> lock(queueMutex);
+    while (!pendingClients.isEmpty())
+    {
+        close(pendingClients.dequeue().sock);
+    }
 }
 
-void handler(int sg) {
+void handler(int sg) 
+{
     (void)sg;
     flag = 0;
 }
+
 int main(int argc, char* argv[])
 {
 
-    signal(SIGINT, handler); // whenever ctrl+c will be pressed to exit the program the flag wll be set so insead of using infinite loop you can loop on flag to safely close things and exit
-    // 2. listenSock = createListenSocket(LB_PORT).
-    // 3. Start a thread that runs acceptLoop(listenSock) and detach it.
-    // 4. Call dispatcherLoop().
+    if (argc >= 3)
+    {
+        serverHost = argv[1];
+        serverPort = atoi(argv[2]);
+    }
+
+    signal(SIGINT, handler);
+
+    int listenSock = createListenSocket(lbPort);
+    thread(acceptLoop, listenSock).detach();
+    dispatcherLoop();
+
+    close(listenSock);
     return 0;
 }
